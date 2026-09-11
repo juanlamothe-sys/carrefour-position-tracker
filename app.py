@@ -1,7 +1,13 @@
 import re
 import time
 from datetime import datetime
-from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urljoin,
+    urlparse,
+    urlunparse,
+)
 
 import pandas as pd
 import requests
@@ -32,51 +38,57 @@ MARCAS = [
     "Daewoo",
 ]
 
-PRICE_RE = re.compile(
+PATRON_PRECIO = re.compile(
     r"(?<!\d)(\d{1,4}(?:[. ]\d{3})*(?:,\d{1,2})?)\s*€"
 )
 
 
 def limpiar_texto(texto):
+    """Elimina espacios y saltos de línea innecesarios."""
     return re.sub(r"\s+", " ", texto or "").strip()
 
 
-def validar_url(url):
+def validar_url_carrefour(url):
+    """Comprueba que la URL pertenece a carrefour.es."""
     try:
-        parsed = urlparse(url.strip())
+        url_analizada = urlparse(url.strip())
 
         return (
-            parsed.scheme in {"http", "https"}
-            and parsed.netloc.lower().endswith("carrefour.es")
+            url_analizada.scheme in {"http", "https"}
+            and url_analizada.netloc.lower().endswith("carrefour.es")
         )
 
     except Exception:
         return False
 
 
-def url_pagina(url, pagina):
-    parsed = urlparse(url)
+def crear_url_pagina(url, numero_pagina):
+    """Añade el número de página a la URL de la categoría."""
+    url_analizada = urlparse(url)
 
     parametros = dict(
         parse_qsl(
-            parsed.query,
+            url_analizada.query,
             keep_blank_values=True,
         )
     )
 
-    if pagina > 1:
-        parametros["page"] = str(pagina)
+    if numero_pagina > 1:
+        parametros["page"] = str(numero_pagina)
     else:
         parametros.pop("page", None)
 
+    nueva_consulta = urlencode(parametros)
+
     return urlunparse(
-        parsed._replace(
-            query=urlencode(parametros)
+        url_analizada._replace(
+            query=nueva_consulta
         )
     )
 
 
-def identificar_marca_modelo(nombre_producto):
+def identificar_marca(nombre_producto):
+    """Identifica la marca dentro del nombre del producto."""
     nombre_limpio = limpiar_texto(nombre_producto)
 
     for marca in sorted(
@@ -91,46 +103,72 @@ def identificar_marca_modelo(nombre_producto):
         )
 
         if coincidencia:
-            texto_posterior = nombre_limpio[
-                coincidencia.end():
-            ].strip(" -–,|")
+            return marca
 
-            modelo_encontrado = re.search(
-                r"\b(?=[A-Z0-9.-]*\d)"
-                r"(?:[A-Z0-9]*A-Z0-9.-]{3,})\b",
-               *texto_posterior,
-                re.IGNORECASE,
-            )
-
-      *     if modelo_encontrado:
-       *        modelo = modelo_encontrado*group(0)
-            else:
-       *        modelo = texto_posterior
-
-*           return marca, modelo
-
- *  return "No identificada", nombre*limpio
+    return "No identificada"
 
 
-def convertir_precio(prec*o):
-    if not precio:
-        ret*rn None
+def identificar_modelo(nombre_producto, marca):
+    """Intenta extraer el código de modelo del nombre del producto."""
+    nombre_limpio = limpiar_texto(nombre_producto)
+
+    if marca == "No identificada":
+        return nombre_limpio
+
+    coincidencia_marca = re.search(
+        rf"\b{re.escape(marca)}\b",
+        nombre_limpio,
+        re.IGNORECASE,
+    )
+
+    if not coincidencia_marca:
+        return nombre_limpio
+
+    texto_despues_marca = nombre_limpio[
+        coincidencia_marca.end():
+    ].strip(" -–,|")
+
+    patron_modelo = re.compile(
+        r"\b(?=[A-Z0-9.-]*\d)"
+        r"[A-Z0-9][A-Z0-9.-]{3,}\b",
+        re.IGNORECASE,
+    )
+
+    modelo_encontrado = patron_modelo.search(
+        texto_despues_marca
+    )
+
+    if modelo_encontrado:
+        return modelo_encontrado.group(0)
+
+    if texto_despues_marca:
+        return texto_despues_marca
+
+    return nombre_limpio
+
+
+def convertir_precio_a_numero(precio_texto):
+    """Convierte un precio español a un número decimal."""
+    if not precio_texto:
+        return None
 
     precio_limpio = (
-   *    precio.replace("€", "")
-      * .replace(" ", "")
-        .replac*(".", "")
-        .replace(",", ".*)
+        precio_texto
+        .replace("€", "")
+        .replace(" ", "")
+        .replace(".", "")
+        .replace(",", ".")
     )
 
     try:
-        return f*oat(precio_limpio)
+        return float(precio_limpio)
 
     except ValueError:
         return None
 
 
-def buscar_tarjeta_producto(enlace):
+def encontrar_tarjeta_producto(enlace):
+    """Busca el contenedor HTML que incluye título, precio y vendedor."""
     elemento = enlace
 
     for _ in range(10):
@@ -143,7 +181,7 @@ def buscar_tarjeta_producto(enlace):
         if elemento is None:
             break
 
-        texto = limpiar_texto(
+        texto_elemento = limpiar_texto(
             elemento.get_text(
                 " ",
                 strip=True,
@@ -155,8 +193,8 @@ def buscar_tarjeta_producto(enlace):
         )
 
         if (
-            "€" in texto
-            and len(texto) < 3000
+            "€" in texto_elemento
+            and len(texto_elemento) < 3500
             and len(enlaces_producto) <= 4
         ):
             return elemento
@@ -165,17 +203,21 @@ def buscar_tarjeta_producto(enlace):
 
 
 def obtener_vendedor(texto_tarjeta):
-    patrones = [
-        r"Vendido por\s+(.+?)(?:Click&Collect)",
-        r"Vendido por\s+(.+?)(?:Envío gratis)",
-        r"Vendido por\s+(.+?)(?:Envio gratis)",
-        r"Vendido por\s+(.+?)(?:Envío Gratis)",
-        r"Vendido por\s+(.+?)(?:Añadir)",
-        r"Vendido por\s+(.+?)(?:Ver detalle)",
-        r"Vendido por\s+(.+?)$",
+    """Extrae el comercio indicado después de 'Vendido por'."""
+    patrones_vendedor = [
+        r"Vendido\s+por\s+(.+?)(?=Click&Collect)",
+        r"Vendido\s+por\s+(.+?)(?=Envío\s+gratis)",
+        r"Vendido\s+por\s+(.+?)(?=Envio\s+gratis)",
+        r"Vendido\s+por\s+(.+?)(?=Envío\s+Gratis)",
+        r"Vendido\s+por\s+(.+?)(?=Super\s+Precio)",
+        r"Vendido\s+por\s+(.+?)(?=Oferta\s+Carrefour)",
+        r"Vendido\s+por\s+(.+?)(?=Más\s+ofertas)",
+        r"Vendido\s+por\s+(.+?)(?=Ver\s+detalle)",
+        r"Vendido\s+por\s+(.+?)(?=Añadir)",
+        r"Vendido\s+por\s+(.+)$",
     ]
 
-    for patron in patrones:
+    for patron in patrones_vendedor:
         coincidencia = re.search(
             patron,
             texto_tarjeta,
@@ -187,116 +229,137 @@ def obtener_vendedor(texto_tarjeta):
                 coincidencia.group(1)
             )
 
-            if len(vendedor) < 100:
+            if vendedor and len(vendedor) <= 100:
                 return vendedor
 
     return "No indicado"
 
 
+def obtener_titulo_producto(enlace):
+    """Obtiene el nombre del producto desde el enlace."""
+    titulo = limpiar_texto(
+        enlace.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+    if len(titulo) >= 8:
+        return titulo
+
+    titulo = limpiar_texto(
+        enlace.get("title")
+        or enlace.get("aria-label")
+        or ""
+    )
+
+    return titulo
+
+
 def analizar_html(html, url_base):
+    """Analiza el HTML y devuelve los productos identificados."""
     soup = BeautifulSoup(
         html,
         "lxml",
     )
 
-    resultados = []
+    productos = []
     urls_detectadas = set()
 
     enlaces = soup.select(
         'a[href*="/p"]'
     )
 
-    for enlace*in enlaces:
-        href = enlace.*et("href", "")
+    for enlace in enlaces:
+        href = enlace.get("href", "")
 
-        url_produc*o = urljoin(
-            url_base,*            href,
-        ).split(*#")[0]
-
-        if not url_product*:
+        if not href:
             continue
 
-        if*url_producto in urls_detectadas:
- *          continue
+        url_producto = urljoin(
+            url_base,
+            href,
+        ).split("#")[0]
 
-        if "/p* not in urlparse(
-            url_*roducto
-        ).path:
-          * continue
+        ruta_producto = urlparse(
+            url_producto
+        ).path
 
-        nombre_producto*= limpiar_texto(
-            enlac*.get_text(
-                " ",
-  *             strip=True,
-         *  )
-        )
-
-        if len(nomb*e_producto) < 8:
-            nombr*_producto = limpiar_texto(
-       *        enlace.get("title")
-      *         or enlace.get("aria-label*)
-                or ""
-          * )
-
-        if len(nombre_producto* < 8:
+        if "/p" not in ruta_producto:
             continue
 
-      * tarjeta = buscar_tarjeta_producto*
+        if url_producto in urls_detectadas:
+            continue
+
+        titulo_producto = obtener_titulo_producto(
             enlace
         )
 
-   *    if tarjeta is None:
-          * continue
-
-        texto_tarjeta =*limpiar_texto(
-            tarjeta*get_text(
-                " ",
-   *            strip=True,
-          * )
-        )
-
-        precios = PR*CE_RE.findall(
-            texto_t*rjeta
-        )
-
-        if not pr*cios:
+        if len(titulo_producto) < 8:
             continue
 
-      * # Si aparecen precio anterior y a*tual,
-        # normalmente el últ*mo es el precio vigente.
-        p*ecio_actual = precios[-1]
-
-       *vendedor = obtener_vendedor(
-     *      texto_tarjeta
+        tarjeta = encontrar_tarjeta_producto(
+            enlace
         )
 
-   *    marca, modelo = identificar_ma*ca_modelo(
-            nombre_prod*cto
+        if tarjeta is None:
+            continue
+
+        texto_tarjeta = limpiar_texto(
+            tarjeta.get_text(
+                " ",
+                strip=True,
+            )
         )
 
-        urls_detect*das.add(
+        precios_encontrados = PATRON_PRECIO.findall(
+            texto_tarjeta
+        )
+
+        if not precios_encontrados:
+            continue
+
+        precio_actual_texto = precios_encontrados[-1]
+
+        precio_actual = convertir_precio_a_numero(
+            precio_actual_texto
+        )
+
+        vendedor = obtener_vendedor(
+            texto_tarjeta
+        )
+
+        marca = identificar_marca(
+            titulo_producto
+        )
+
+        modelo = identificar_modelo(
+            titulo_producto,
+            marca,
+        )
+
+        urls_detectadas.add(
             url_producto
-*       )
-
-        resultados.appen*(
-            {
-                "M*rca": marca,
-                "Mode*o": modelo,
-                "Produ*to": nombre_producto,
-            *   "URL": url_producto,
-          *     "Vendido por": vendedor,
-    *           "Precio (€)": convertir*precio(
-                    precio*actual
-                ),
-        *   }
         )
 
-    return resulta*os
+        productos.append(
+            {
+                "Marca": marca,
+                "Modelo": modelo,
+                "Producto": titulo_producto,
+                "URL": url_producto,
+                "Vendido por": vendedor,
+                "Precio (€)": precio_actual,
+            }
+        )
+
+    return productos
 
 
-def descargar_pagina(sesion, *rl):
+def descargar_html(sesion, url):
+    """Descarga el HTML de una página."""
     respuesta = sesion.get(
- *      url,
+        url,
         timeout=30,
     )
 
@@ -310,10 +373,11 @@ def descargar_pagina(sesion, *rl):
     show_spinner=False,
 )
 def recoger_productos(
-    url,
+    url_categoria,
     maximo_paginas,
-    pausa,
+    pausa_segundos,
 ):
+    """Recorre las páginas del listado y construye la tabla."""
     sesion = requests.Session()
 
     sesion.headers.update(
@@ -334,54 +398,56 @@ def recoger_productos(
                 "application/xml;q=0.9,"
                 "*/*;q=0.8"
             ),
-            "Referer": (
-                "https://www.carrefour.es/"
-            ),
+            "Referer": "https://www.carrefour.es/",
         }
     )
 
-    todos_productos = []
+    todos_los_productos = []
     urls_guardadas = set()
     avisos = []
 
-    for pagina in range(
+    for numero_pagina in range(
         1,
         maximo_paginas + 1,
     ):
-        direccion_pagina = url_pagina(
-            url,
-            pagina,
+        url_pagina = crear_url_pagina(
+            url_categoria,
+            numero_pagina,
         )
 
         try:
-            html = descargar_pagina(
+            html = descargar_html(
                 sesion,
-                direccion_pagina,
+                url_pagina,
             )
 
             productos_pagina = analizar_html(
                 html,
-                direccion_pagina,
+                url_pagina,
             )
 
         except requests.RequestException as error:
             avisos.append(
-                f"Error en la página {pagina}: {error}"
+                "No se pudo consultar la página "
+                f"{numero_pagina}: {error}"
             )
             break
 
-        productos_nuevos = [
-            producto
-            for producto in productos_pagina
-            if producto["URL"] not in urls_guardadas
-        ]
+        productos_nuevos = []
+
+        for producto in productos_pagina:
+            if producto["URL"] not in urls_guardadas:
+                productos_nuevos.append(
+                    producto
+                )
 
         if not productos_nuevos:
-            if pagina == 1:
+            if numero_pagina == 1:
                 avisos.append(
                     "No se han detectado productos. "
                     "Carrefour puede haber cambiado "
-                    "su página o bloqueado la petición."
+                    "la estructura de la página o "
+                    "bloqueado la petición."
                 )
 
             break
@@ -391,15 +457,17 @@ def recoger_productos(
                 producto["URL"]
             )
 
-            todos_productos.append(
+            todos_los_productos.append(
                 producto
             )
 
-        if pagina < maximo_paginas:
-            time.sleep(pausa)
+        if numero_pagina < maximo_paginas:
+            time.sleep(
+                pausa_segundos
+            )
 
     for posicion, producto in enumerate(
-        todos_productos,
+        todos_los_productos,
         start=1,
     ):
         producto["Posición"] = posicion
@@ -415,7 +483,7 @@ def recoger_productos(
     ]
 
     dataframe = pd.DataFrame(
-        todos_productos,
+        todos_los_productos,
         columns=columnas,
     )
 
@@ -431,9 +499,10 @@ st.set_page_config(
 st.title("Monitor de posiciones Carrefour")
 
 st.caption(
-    "Consulta la posición, marca, modelo, precio "
-    "y vendedor de los productos de una categoría."
+    "Consulta la posición, marca, modelo, "
+    "vendedor, precio y URL de los productos."
 )
+
 
 with st.sidebar:
     st.header("Configuración")
@@ -451,7 +520,7 @@ with st.sidebar:
         step=1,
     )
 
-    pausa = st.slider(
+    pausa_segundos = st.slider(
         "Pausa entre páginas",
         min_value=0.5,
         max_value=5.0,
@@ -467,29 +536,35 @@ with st.sidebar:
 
     st.info(
         "La posición corresponde al orden "
-        "observado en el momento de la consulta."
+        "observado en el listado durante "
+        "la consulta."
     )
 
 
 if ejecutar:
-    if not validar_url(url_categoria):
+    if not validar_url_carrefour(
+        url_categoria
+    ):
         st.error(
-            "Introduce una URL válida de carrefour.es."
+            "Introduce una URL válida "
+            "del dominio carrefour.es."
         )
 
         st.stop()
 
     with st.spinner(
-        "Analizando el listado de Carrefour..."
+        "Analizando el listado..."
     ):
         datos, avisos = recoger_productos(
             url_categoria.strip(),
             int(maximo_paginas),
-            float(pausa),
+            float(pausa_segundos),
         )
 
     for aviso in avisos:
-        st.warning(aviso)
+        st.warning(
+            aviso
+        )
 
     if datos.empty:
         st.error(
@@ -501,8 +576,8 @@ if ejecutar:
             f"Se han recogido {len(datos)} productos."
         )
 
-        columna_1, columna_2, columna_3 = (
-            st.columns(3)
+        columna_1, columna_2, columna_3 = st.columns(
+            3
         )
 
         columna_1.metric(
@@ -512,7 +587,9 @@ if ejecutar:
 
         columna_2.metric(
             "Marcas",
-            datos["Marca"].nunique(),
+            int(
+                datos["Marca"].nunique()
+            ),
         )
 
         if datos["Precio (€)"].notna().any():
@@ -522,7 +599,7 @@ if ejecutar:
 
             columna_3.metric(
                 "Precio medio",
-                f"{precio_medio:,.2f} €",
+                f"{precio_medio:.2f} €",
             )
 
         else:
@@ -551,9 +628,11 @@ if ejecutar:
 
         archivo_csv = datos.to_csv(
             index=False,
-        ).encode("utf-8-sig")
+        ).encode(
+            "utf-8-sig"
+        )
 
-        fecha = datetime.now().strftime(
+        fecha_archivo = datetime.now().strftime(
             "%Y%m%d_%H%M%S"
         )
 
@@ -561,18 +640,19 @@ if ejecutar:
             label="Descargar resultados en CSV",
             data=archivo_csv,
             file_name=(
-                f"carrefour_productos_{fecha}.csv"
+                "carrefour_productos_"
+                f"{fecha_archivo}.csv"
             ),
             mime="text/csv",
         )
 
         st.caption(
             "Los productos repetidos se eliminan "
-            "por URL conservando su primera posición."
+            "por URL y se conserva su primera posición."
         )
 
 else:
     st.write(
-        "Pulsa **Recoger productos** para "
-        "analizar el listado."
+        "Pulsa **Recoger productos** "
+        "para analizar el listado."
     )
