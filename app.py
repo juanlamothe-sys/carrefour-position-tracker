@@ -99,7 +99,7 @@ def identificar_marca_modelo(nombre_producto):
                 r"\b(?=[A-Z0-9.-]*\d)"
                 r"(?:[A-Z0-9]*A-Z0-9.-]{3,})\b",
                *texto_posterior,
-                r*.IGNORECASE,
+                re.IGNORECASE,
             )
 
       *     if modelo_encontrado:
